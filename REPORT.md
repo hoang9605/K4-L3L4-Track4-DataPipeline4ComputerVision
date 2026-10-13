@@ -41,3 +41,23 @@ Staging đổi tên cột của B về cùng schema A, chia `spd_kmh` cho 3,6, c
 ### Câu 3
 
 `max_gap_ms` có `severity: warn` vì mất mẫu cảm biến là lỗi đã biết: cần cảnh báo, còn bước join đánh dấu khung mất đồng bộ. `in_range` mặc định là `error`, vì tốc độ ngoài 0–70 m/s là dữ liệu không hợp lệ và phải chặn trước Gold. Trong `break_gate.json`, nới `max_speed_mps` lên 1000 khiến test **in_range_silver_telemetry_speed_mps__70__0** bắt **6 dòng**; kết quả **PASS=5 WARN=1 ERROR=1 SKIP=0**. Khôi phục luật cho **PASS=6 WARN=1 ERROR=0 SKIP=0**. Luật làm sạch và cổng kiểm tra độc lập giúp bắt việc vô tình nới luật, không chỉ xác nhận lệnh biến đổi đã chạy.
+
+## Bước 3 · Silver frames
+
+### Câu 4
+
+Thí nghiệm trên `trip-07304` trong `idempotency.json`: toàn bảng có **1246 dòng** trước và sau hai lần chạy lại; fingerprint đều **6c7480dfde7e**. Trip có **34 khung**, mô phỏng append hai lần tạo **68 dòng**, tức 2 lần dữ liệu của trip. Pipeline ghi Delta overwrite với predicate `trip_id` nên thay đúng partition, các trip khác không bị nhân đôi.
+
+Delta công bố phiên bản mới bằng commit nguyên tử: người đọc thấy snapshot cũ hoặc mới, thay vì khoảng trống do xóa trước rồi ghi lại. Nếu lỗi trước commit, snapshot trước vẫn dùng được; file chưa được tham chiếu có thể tồn tại nhưng không thành dòng đã commit. Trong mã hiện tại, lỗi mô phỏng xảy ra ở đầu `extract_trip`, trước khi trích xuất/ghi bảng; bài tập này kiểm chứng retry, không chứng minh một crash thật giữa commit.
+
+### Câu 5
+
+Khung đen có độ sáng dưới ngưỡng `dark_luma`, gần như không có tín hiệu; khung tối vẫn có nội dung nhưng độ sáng nằm giữa `dark_luma` và `dark_soft`. Pipeline loại khung đen và gắn cờ khung tối, giữ lại nếu không vi phạm cờ khác. A có **6 đen, 9 mờ, 4 cờ tối, 149 gần trùng, 7 mất đồng bộ**; B có **4 đen, 0 mờ, 61 cờ tối, 53 gần trùng, 7 mất đồng bộ**. Các cờ có thể chồng nhau; số cờ tối không đồng nghĩa mọi khung đó đều vào Gold.
+
+| dHash khác tối đa | Khung trùng A | Khung trùng B |
+|---|---:|---:|
+| 0 | 61 | 8 |
+| 2 | 149 | 53 |
+| 6 | 363 | 244 |
+
+Chọn ngưỡng 2 như lab: ngưỡng 0 bỏ sót ảnh gần giống, ngưỡng 6 loại tới 363/602 khung A và 244/644 khung B, có nguy cơ mất cảnh hữu ích. Xe chậm tạo ảnh kế tiếp tương tự dù camera bình thường, nên cần xem ảnh và tốc độ trước khi kết luận đứng hình. Giữ cảnh tối giúp mô hình học đường hầm/bóng râm, nhưng cần xem xét độ hữu ích và nhiễu thay vì chỉ dựa vào độ sáng. Join event time có độ lệch trung bình A/B **66/73 ms**, tối đa **2884/3112 ms** ở đoạn mất cảm biến. Unit test xử lý ảnh: **9/9 đạt**.
