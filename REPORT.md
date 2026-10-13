@@ -79,3 +79,36 @@ Phiên bản này chỉ băm cặp frame_id/split, **không băm toàn bộ pixe
 Manifest của lần DAG đầu tiên được lưu trong `report/evidence/dataset_manifest.json`: `bronze.raw_telemetry_a=0`, `bronze.raw_telemetry_b=0`, `bronze.trips_raw=0`, `bronze.video_files=1`, `silver.frames=25`, `silver.telemetry=0`, `silver.frames_flagged=0`, `silver.frame_telemetry=0`. Video A có sha256 `636ba1a98dfc5ba665d1c935e1d2064e69f4df360ff9ffbd15795957d5e7e9aa`; B là `bfa62703f645ff77a8578ae3fc74a00881140d38a404d43c8e2af265bbee9fdc`.
 
 Gold có **436 khung A, 583 khung B**, bỏ `is_black`, `is_blurry`, `is_near_dup`, `not sync_ok`; split theo trip, phân tầng theo drive. Sau 3 tháng, cần giữ video/CSV đúng checksum, snapshot Delta nêu trên nếu còn, mã và cấu hình ngưỡng/split, MSSV `2A202602489`, manifest cùng danh sách frame/split. Lineage cho biết phiên bản nguồn nhưng không tự giữ lại dữ liệu nếu lịch sử đã bị xóa/vacuum. Các lần chạy mới có thể cùng dataset_version dù số phiên bản Delta khác.
+
+## Bước 5 · Điều phối và phục vụ
+
+### Câu 9
+
+Sau reset từ lake trống, lần chạy `lab_recovery_02489` có đúng **1 task đỏ**: `silver_frames`, map index **19**, trip **trip-07304**; **25** mapped task còn lại thành công. **7** task `upstream_failed` gồm `dbt_run_silver`, `dbt_test_silver`, `dbt_run_gold`, `dbt_test_gold`, `publish_lake`, `export_dataset`, `publish_warehouse`. Log ghi `RuntimeError: simulated crash while extracting trip-07304; run it again`.
+
+Trong UI, tắt Downstream và clear **chỉ map index 19** (Affected Tasks: 1). Task chạy lại thành công; snapshot `airflow_after_clear_one.json` cho **30 success + 7 upstream_failed**. Airflow 2.10.5 không tự bỏ trạng thái upstream_failed đã kết thúc, nên tiếp tục clear `dbt_run_silver` cùng downstream, **7 task**, giữ nguyên 25 trip đã thành công. Snapshot `airflow_recovered_tasks.json` cho **37/37 success**. Tổng phục hồi lần đầu: 1 task trích xuất chạy lại; 7 downstream chạy lần đầu sau khi được mở khóa, không phải trích xuất lại cả 26 trip.
+
+Sau phục hồi, verify **27/27**, Silver có **1246** frame_id duy nhất, Gold **1019** khung và dataset_version vẫn **d58c7e2b9dfa**, không nhân đôi. Bằng chứng gồm `airflow_clear_one_task.png`, `airflow_clear_downstream.png`, `airflow_graph.png`, `airflow_recovered.png` và các snapshot JSON. Để chụp rõ tên trip, mô phỏng lỗi lại trên riêng task 19 sau khi lần phục hồi đầu đã xong; ảnh `airflow_crash_log.png` và log gốc `airflow_crash_log.txt` là **attempt 3** của lần bổ sung này, rồi task được clear riêng để phục hồi ở attempt 4. Vì 7 downstream đã thành công, lần bổ sung không có 7 upstream_failed như lần đầu. Các lần thử được phân biệt rõ, không ghép ảnh attempt 3 thành log của attempt 1.
+
+### Câu 10
+
+Ở mức 500 xe/ngày, ba nút thắt dự kiến (chưa benchmark ở quy mô này) là: **decode video**, vì FFmpeg dùng CPU và mỗi trip ghi ảnh riêng; chuyển sang worker phân tán theo trip, quản lý hàng đợi và dùng phần cứng decode nếu đo đạc cho thấy cần. **DuckDB/dbt trên một máy**, vì quét/join và ghi dữ liệu nhiều xe cạnh tranh RAM/I/O; dùng engine phân tán như Spark cho biến đổi lớn trên lakehouse, vẫn giữ test chất lượng và partition hợp lý. **Airflow LocalExecutor và storage cục bộ**, vì một container giới hạn song song, tài nguyên và nhiều object ảnh nhỏ; tách scheduler/webserver, dùng executor có worker mở rộng, object storage bền vững và gom file metadata/ảnh khi phù hợp. Airflow điều phối các job, không nên vận chuyển toàn bộ payload video qua scheduler. Quy mô 500 xe cần đo dung lượng/ngày và throughput trước khi chọn số worker.
+
+## Câu hỏi riêng của bạn trên Metabase
+
+**Trip nào có tỷ lệ khung bị loại cao nhất?** SQL đã lưu trong `report/metabase_question.sql`, thêm vào dashboard ở `http://localhost:3000/dashboard/2`, card 46:
+
+```sql
+SELECT drive_id, trip_id, frames, frames_kept,
+       frames - frames_kept AS frames_dropped,
+       ROUND(100.0 * (frames - frames_kept) / NULLIF(frames, 0), 2) AS dropped_pct,
+       avg_speed_kmh, split
+FROM marts.mart_trip_summary
+ORDER BY dropped_pct DESC, trip_id;
+```
+
+Kết quả thực tế 26 trip: cao nhất là **drive_a / trip-04622**, 60 khung, giữ 26, loại **34 (56,67%)**, tốc độ trung bình 67,1 km/h. Tiếp theo `trip-03904`: **11/22 (50%)**; `trip-02086`: **28/60 (46,67%)**. Câu hỏi giúp ưu tiên kiểm tra trip mất nhiều dữ liệu; truy vấn này không tách nguyên nhân loại, nên không thể quy mọi khung bị loại cho camera đứng hình chỉ từ tỷ lệ. Bằng chứng: `metabase_question.json` và `metabase_dashboard.png`.
+
+## Nhìn lại
+
+Quan sát đáng chú ý: thí nghiệm chia theo frame làm cả 26 trip có mặt ở train và test, dù tỷ lệ split trông hợp lý. Ngưỡng dHash 6 loại nhiều khung hơn đáng kể so với 2, nhưng riêng số lượng không chứng minh chất lượng tốt hơn. Lỗi CRLF trên Windows làm script khởi động không chạy và làm checker checksum báo khác bản gốc; chuyển LF đã khôi phục checksum đúng. Cần kiểm tra thêm khả năng cùng tuyến đường xuất hiện ở các trip khác nhau, hoặc GPS có giá trị hợp kiểu nhưng sai vị trí thực; các test hiện tại chưa chứng minh đã bắt hai lỗi này. Nội dung được tổng hợp với hỗ trợ Codex và cần được sinh viên đọc, đối chiếu trước vấn đáp.
