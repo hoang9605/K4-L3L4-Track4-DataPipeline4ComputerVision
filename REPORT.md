@@ -61,3 +61,21 @@ Khung đen có độ sáng dưới ngưỡng `dark_luma`, gần như không có 
 | 6 | 363 | 244 |
 
 Chọn ngưỡng 2 như lab: ngưỡng 0 bỏ sót ảnh gần giống, ngưỡng 6 loại tới 363/602 khung A và 244/644 khung B, có nguy cơ mất cảnh hữu ích. Xe chậm tạo ảnh kế tiếp tương tự dù camera bình thường, nên cần xem ảnh và tốc độ trước khi kết luận đứng hình. Giữ cảnh tối giúp mô hình học đường hầm/bóng râm, nhưng cần xem xét độ hữu ích và nhiễu thay vì chỉ dựa vào độ sáng. Join event time có độ lệch trung bình A/B **66/73 ms**, tối đa **2884/3112 ms** ở đoạn mất cảm biến. Unit test xử lý ảnh: **9/9 đạt**.
+
+## Bước 4 · Gold
+
+### Câu 6
+
+`leakage.json` ghi **1019 khung thuộc 26 trip**. Chia ngẫu nhiên theo frame làm **26 trip** xuất hiện ở nhiều split, cả **26** có khung ở train và test; chia theo trip làm **0 trip** bị chia cắt. Khung liền nhau gần như cùng cảnh, nên mô hình có thể ghi nhớ nền/đoạn đường và đạt điểm test cao dù chưa tổng quát được sang chuyến mới. Chia theo trip giữ cả cảnh trong một split để giảm rò rỉ này, nhưng vẫn cần kiểm tra các chuyến khác nhau có lặp tuyến đường hay không.
+
+### Câu 7
+
+Phiên bản là **d58c7e2b9dfa**, được tính từ sha256 của danh sách `frame_id|split` sắp theo frame_id, lấy 12 ký tự đầu. Nó không phụ thuộc giờ chạy hoặc số commit Delta. Lần chạy thủ công và DAG từ lake trống tạo cùng phiên bản, cùng **740/113/166** khung train/val/test. MSSV đầy đủ được trộn vào thứ tự md5 để chia trip; đổi MSSV có thể đổi trip ở các split và vì thế đổi phiên bản. Thí nghiệm đổi MSSV chưa được thực hiện; giải thích này dựa trên mã chia split, không phải số liệu giả lập.
+
+Phiên bản này chỉ băm cặp frame_id/split, **không băm toàn bộ pixel hay mọi cột telemetry**; vì vậy muốn xác nhận đầy đủ dữ liệu cần xem thêm manifest, sha256 đầu vào và lineage. Hai lần chạy lại có thể giữ dataset_version nhưng có thời điểm tạo và phiên bản bảng upstream khác nhau.
+
+### Câu 8
+
+Manifest của lần DAG đầu tiên được lưu trong `report/evidence/dataset_manifest.json`: `bronze.raw_telemetry_a=0`, `bronze.raw_telemetry_b=0`, `bronze.trips_raw=0`, `bronze.video_files=1`, `silver.frames=25`, `silver.telemetry=0`, `silver.frames_flagged=0`, `silver.frame_telemetry=0`. Video A có sha256 `636ba1a98dfc5ba665d1c935e1d2064e69f4df360ff9ffbd15795957d5e7e9aa`; B là `bfa62703f645ff77a8578ae3fc74a00881140d38a404d43c8e2af265bbee9fdc`.
+
+Gold có **436 khung A, 583 khung B**, bỏ `is_black`, `is_blurry`, `is_near_dup`, `not sync_ok`; split theo trip, phân tầng theo drive. Sau 3 tháng, cần giữ video/CSV đúng checksum, snapshot Delta nêu trên nếu còn, mã và cấu hình ngưỡng/split, MSSV `2A202602489`, manifest cùng danh sách frame/split. Lineage cho biết phiên bản nguồn nhưng không tự giữ lại dữ liệu nếu lịch sử đã bị xóa/vacuum. Các lần chạy mới có thể cùng dataset_version dù số phiên bản Delta khác.
